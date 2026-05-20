@@ -2,7 +2,7 @@ import hashlib
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent.parent / "data" / "leads.db"
@@ -92,7 +92,7 @@ def get_tenant_by_api_key(api_key: str) -> TenantConfig | None:
 
 
 def is_duplicate(client_id: str, phone_hash: str) -> bool:
-    cutoff = (datetime.utcnow() - timedelta(hours=DEDUP_TTL_HOURS)).isoformat(sep=" ")
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=DEDUP_TTL_HOURS)).isoformat(sep=" ")
     with get_conn() as conn:
         row = conn.execute(
             """SELECT 1 FROM evaluations
