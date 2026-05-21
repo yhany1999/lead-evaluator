@@ -1,5 +1,6 @@
 import sqlite3
 import pytest
+from datetime import datetime, timedelta, timezone
 from tools import db as db_module
 from tools.db import (
     create_tenant,
@@ -34,12 +35,13 @@ def test_tier_counts_exclude_duplicates(tmp_db):
 
 def test_records_outside_window_excluded(tmp_db):
     create_tenant("agency-01", "key", "Alpha")
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat(sep=" ")
     conn = sqlite3.connect(str(db_module.DB_PATH))
     conn.execute(
         """INSERT INTO evaluations
            (client_id, phone_hash, tier, confidence, is_duplicate, evaluated_at)
-           VALUES (?, ?, ?, ?, ?, datetime('now', '-25 hours'))""",
-        ("agency-01", hash_phone("+1"), "VIP", 90, 0),
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        ("agency-01", hash_phone("+1"), "VIP", 90, 0, cutoff),
     )
     conn.commit()
     conn.close()
@@ -70,3 +72,27 @@ def test_avg_confidence_excludes_duplicates(tmp_db):
     log_evaluation("agency-01", hash_phone("+2"), "Medium", 0, is_dup=True)
     stats = get_stats_window("agency-01", 24)
     assert stats["avg_confidence"] == 80
+
+
+def test_avg_confidence_classical_rounding(tmp_db):
+    create_tenant("agency-01", "key", "Alpha")
+    log_evaluation("agency-01", hash_phone("+1"), "VIP", 80)
+    log_evaluation("agency-01", hash_phone("+2"), "Medium", 81)
+    # avg = 80.5 — classical rounding gives 81, banker's rounding gives 80
+    stats = get_stats_window("agency-01", 24)
+    assert stats["avg_confidence"] == 81
+
+
+def test_avg_confidence_zero_when_all_duplicates(tmp_db):
+    create_tenant("agency-01", "key", "Alpha")
+    log_evaluation("agency-01", hash_phone("+1"), "VIP", 0, is_dup=True)
+    stats = get_stats_window("agency-01", 24)
+    assert stats["avg_confidence"] == 0
+
+
+def test_hours_zero_returns_zeroed_counts(tmp_db):
+    create_tenant("agency-01", "key", "Alpha")
+    log_evaluation("agency-01", hash_phone("+1"), "VIP", 90)
+    # hours=0 means cutoff=now, so evaluated_at > now is always false
+    stats = get_stats_window("agency-01", 0)
+    assert stats["total"] == 0

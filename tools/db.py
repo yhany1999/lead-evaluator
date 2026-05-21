@@ -146,7 +146,7 @@ def get_stats_window(client_id: str, hours: int) -> dict:
         row = conn.execute(
             """
             SELECT
-                COUNT(*)                                                               AS total,
+                COUNT(*) AS total,  -- includes both real evaluations and duplicates
                 SUM(CASE WHEN tier = 'VIP'    AND is_duplicate = 0 THEN 1 ELSE 0 END) AS vip,
                 SUM(CASE WHEN tier = 'Medium' AND is_duplicate = 0 THEN 1 ELSE 0 END) AS medium,
                 SUM(CASE WHEN tier = 'Low'    AND is_duplicate = 0 THEN 1 ELSE 0 END) AS low,
@@ -164,5 +164,5 @@ def get_stats_window(client_id: str, hours: int) -> dict:
         "medium":         row["medium"] or 0,
         "low":            row["low"] or 0,
         "duplicates":     row["duplicates"] or 0,
-        "avg_confidence": round(avg_conf) if avg_conf is not None else 0,
+        "avg_confidence": int(avg_conf + 0.5) if avg_conf is not None else 0,
     }
