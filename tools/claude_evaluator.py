@@ -158,7 +158,7 @@ def _parse_claude_json(text: str) -> dict:
     return result
 
 
-def evaluate_lead(lead: dict) -> dict:
+def evaluate_lead(lead: dict, tenant=None) -> dict:
     """
     Send the enriched lead payload to Claude for qualification.
 
