@@ -1,11 +1,13 @@
 import sqlite3
 import pytest
 from datetime import datetime, timedelta, timezone
+from fastapi.testclient import TestClient
 from tools import db as db_module
 from tools.db import (
     create_tenant,
     get_stats_window,
     hash_phone,
+    init_db,
     log_evaluation,
 )
 
@@ -102,11 +104,6 @@ def test_hours_zero_returns_zeroed_counts(tmp_db):
 # Integration tests — GET /stats endpoint
 # ---------------------------------------------------------------------------
 
-import pytest
-from fastapi.testclient import TestClient
-from tools import db as db_module
-from tools.db import create_tenant, init_db, log_evaluation, hash_phone
-
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
@@ -127,6 +124,8 @@ def test_stats_returns_200_with_all_windows(client):
 
 
 def test_stats_missing_key_returns_422(client):
+    # FastAPI returns 422 (Unprocessable Entity) for a missing required Header(...)
+    # parameter — this is consistent with test_auth.py::test_missing_api_key_returns_422
     resp = client.get("/stats")
     assert resp.status_code == 422
 
@@ -153,6 +152,7 @@ def test_stats_counts_reflect_evaluations(client):
     assert w["vip"] == 1
     assert w["duplicates"] == 1
     assert w["total"] == 2
+    assert w["avg_confidence"] == 90  # duplicate excluded from avg
 
 
 def test_stats_cross_tenant_isolation(tmp_path, monkeypatch):

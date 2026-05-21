@@ -79,14 +79,19 @@ def health() -> dict:
 
 @app.get("/stats", response_model=StatsResponse)
 def stats(tenant: TenantConfig = Depends(require_tenant)) -> StatsResponse:
-    return StatsResponse(
-        client_id=tenant.client_id,
-        windows={
-            "last_24h": WindowStats(**get_stats_window(tenant.client_id, 24)),
-            "last_7d":  WindowStats(**get_stats_window(tenant.client_id, 168)),
-            "last_30d": WindowStats(**get_stats_window(tenant.client_id, 720)),
-        },
-    )
+    try:
+        # Three separate queries — one per window — is intentional: no cross-window
+        # transaction is needed and SQLite handles concurrent reads well.
+        return StatsResponse(
+            client_id=tenant.client_id,
+            windows={
+                "last_24h": WindowStats(**get_stats_window(tenant.client_id, 24)),
+                "last_7d":  WindowStats(**get_stats_window(tenant.client_id, 168)),
+                "last_30d": WindowStats(**get_stats_window(tenant.client_id, 720)),
+            },
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="stats unavailable") from exc
 
 
 @app.post("/evaluate", response_model=EvaluationResult)
