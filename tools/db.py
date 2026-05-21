@@ -138,3 +138,31 @@ def create_tenant(client_id: str, api_key: str, name: str, **kwargs) -> None:
                 kwargs.get("output_language", "en"),
             ),
         )
+
+
+def get_stats_window(client_id: str, hours: int) -> dict:
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat(sep=" ")
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(*)                                                               AS total,
+                SUM(CASE WHEN tier = 'VIP'    AND is_duplicate = 0 THEN 1 ELSE 0 END) AS vip,
+                SUM(CASE WHEN tier = 'Medium' AND is_duplicate = 0 THEN 1 ELSE 0 END) AS medium,
+                SUM(CASE WHEN tier = 'Low'    AND is_duplicate = 0 THEN 1 ELSE 0 END) AS low,
+                SUM(CASE WHEN is_duplicate = 1 THEN 1 ELSE 0 END)                     AS duplicates,
+                AVG(CASE WHEN is_duplicate = 0 THEN confidence ELSE NULL END)          AS avg_conf
+            FROM evaluations
+            WHERE client_id = ? AND evaluated_at > ?
+            """,
+            (client_id, cutoff),
+        ).fetchone()
+    avg_conf = row["avg_conf"]
+    return {
+        "total":          row["total"] or 0,
+        "vip":            row["vip"] or 0,
+        "medium":         row["medium"] or 0,
+        "low":            row["low"] or 0,
+        "duplicates":     row["duplicates"] or 0,
+        "avg_confidence": round(avg_conf) if avg_conf is not None else 0,
+    }
