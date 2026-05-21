@@ -96,3 +96,73 @@ def test_hours_zero_returns_zeroed_counts(tmp_db):
     # hours=0 means cutoff=now, so evaluated_at > now is always false
     stats = get_stats_window("agency-01", 0)
     assert stats["total"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — GET /stats endpoint
+# ---------------------------------------------------------------------------
+
+import pytest
+from fastapi.testclient import TestClient
+from tools import db as db_module
+from tools.db import create_tenant, init_db, log_evaluation, hash_phone
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
+    init_db()
+    create_tenant("agency-01", "valid-key", "Alpha Realty")
+    from tools.api_server import app
+    with TestClient(app) as c:
+        yield c
+
+
+def test_stats_returns_200_with_all_windows(client):
+    resp = client.get("/stats", headers={"X-API-Key": "valid-key"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["client_id"] == "agency-01"
+    assert set(data["windows"].keys()) == {"last_24h", "last_7d", "last_30d"}
+
+
+def test_stats_missing_key_returns_422(client):
+    resp = client.get("/stats")
+    assert resp.status_code == 422
+
+
+def test_stats_invalid_key_returns_401(client):
+    resp = client.get("/stats", headers={"X-API-Key": "wrong-key"})
+    assert resp.status_code == 401
+
+
+def test_stats_empty_db_returns_zeroed_counts(client):
+    resp = client.get("/stats", headers={"X-API-Key": "valid-key"})
+    window = resp.json()["windows"]["last_24h"]
+    assert window == {
+        "total": 0, "vip": 0, "medium": 0,
+        "low": 0, "duplicates": 0, "avg_confidence": 0,
+    }
+
+
+def test_stats_counts_reflect_evaluations(client):
+    log_evaluation("agency-01", hash_phone("+1"), "VIP", 90)
+    log_evaluation("agency-01", hash_phone("+2"), "VIP", 0, is_dup=True)
+    resp = client.get("/stats", headers={"X-API-Key": "valid-key"})
+    w = resp.json()["windows"]["last_24h"]
+    assert w["vip"] == 1
+    assert w["duplicates"] == 1
+    assert w["total"] == 2
+
+
+def test_stats_cross_tenant_isolation(tmp_path, monkeypatch):
+    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "isolated.db")
+    init_db()
+    create_tenant("agency-01", "key-one", "Alpha")
+    create_tenant("agency-02", "key-two", "Beta")
+    log_evaluation("agency-01", hash_phone("+1"), "VIP", 88)
+    from tools.api_server import app
+    with TestClient(app) as c:
+        resp = c.get("/stats", headers={"X-API-Key": "key-two"})
+    assert resp.status_code == 200
+    assert resp.json()["windows"]["last_24h"]["total"] == 0

@@ -22,7 +22,7 @@ from pydantic import BaseModel
 
 from tools.auth import require_tenant
 from tools.claude_evaluator import evaluate_lead
-from tools.db import TenantConfig, hash_phone, init_db, is_duplicate, log_evaluation
+from tools.db import TenantConfig, get_stats_window, hash_phone, init_db, is_duplicate, log_evaluation
 
 
 @asynccontextmanager
@@ -58,9 +58,35 @@ class EvaluationResult(BaseModel):
     is_duplicate: bool = False
 
 
+class WindowStats(BaseModel):
+    total: int
+    vip: int
+    medium: int
+    low: int
+    duplicates: int
+    avg_confidence: int
+
+
+class StatsResponse(BaseModel):
+    client_id: str
+    windows: dict[str, WindowStats]
+
+
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/stats", response_model=StatsResponse)
+def stats(tenant: TenantConfig = Depends(require_tenant)) -> StatsResponse:
+    return StatsResponse(
+        client_id=tenant.client_id,
+        windows={
+            "last_24h": WindowStats(**get_stats_window(tenant.client_id, 24)),
+            "last_7d":  WindowStats(**get_stats_window(tenant.client_id, 168)),
+            "last_30d": WindowStats(**get_stats_window(tenant.client_id, 720)),
+        },
+    )
 
 
 @app.post("/evaluate", response_model=EvaluationResult)
