@@ -39,6 +39,8 @@ def get_conn():
 
 def init_db() -> None:
     with get_conn() as conn:
+        # WAL mode persists on the DB file; safe to set on every startup.
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS tenants (
                 client_id         TEXT PRIMARY KEY,
@@ -61,6 +63,8 @@ def init_db() -> None:
                 evaluated_at TEXT NOT NULL DEFAULT (datetime('now')),
                 FOREIGN KEY (client_id) REFERENCES tenants(client_id)
             );
+            CREATE INDEX IF NOT EXISTS idx_eval_tenant_time
+                ON evaluations (client_id, evaluated_at);
         """)
 
 

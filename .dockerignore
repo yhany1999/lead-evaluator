@@ -1,0 +1,13 @@
+.git
+.claude
+.env
+__pycache__
+**/__pycache__
+**/*.pyc
+**/*.pyo
+data/
+tests/
+docs/
+workflows/
+.tmp/
+*.md

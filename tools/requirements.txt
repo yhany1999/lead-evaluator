@@ -2,5 +2,6 @@ anthropic>=0.50.0
 python-dotenv>=1.0.0
 fastapi>=0.110.0
 uvicorn>=0.29.0
+slowapi>=0.5.7
 pytest>=8.0.0
 httpx>=0.27.0
