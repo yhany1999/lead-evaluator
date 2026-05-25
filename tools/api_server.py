@@ -4,6 +4,7 @@ HTTP wrapper around claude_evaluator.evaluate_lead().
 
 POST /evaluate  — requires X-API-Key header, rate-limited 60 req/min per key
 GET  /stats     — requires X-API-Key header
+GET  /dashboard — requires X-API-Key header, returns HTML
 GET  /health    — liveness check, no auth required
 
 Start:
@@ -18,9 +19,12 @@ import os
 import time
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -28,12 +32,27 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from tools.auth import require_tenant
 from tools.claude_evaluator import evaluate_lead
-from tools.db import TenantConfig, get_stats_window, hash_phone, init_db, is_duplicate, log_evaluation
+from tools.db import (
+    QuotaExceededError,
+    TenantConfig,
+    check_quota,
+    get_quota_status,
+    get_recent_evaluations,
+    get_stats_window,
+    get_top_locations,
+    hash_phone,
+    init_db,
+    is_duplicate,
+    log_evaluation,
+)
+from tools.integrations import fire_integrations
 from tools.logging_config import configure_logging
 
 load_dotenv()
 
 log = logging.getLogger(__name__)
+
+templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 
 def _tenant_key(request: Request) -> str:
@@ -74,11 +93,13 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Lead Evaluator", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="Lead Evaluator", version="3.0.0", lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(_RequestLogger)
 
+
+# ── Pydantic models ────────────────────────────────────────────────────────────
 
 class LeadPayload(BaseModel):
     lead_name: str = ""
@@ -104,6 +125,19 @@ class EvaluationResult(BaseModel):
     is_duplicate: bool = False
 
 
+class TokenStats(BaseModel):
+    input: int
+    output: int
+    cache_read: int
+    estimated_usd: float
+
+
+class QuotaStats(BaseModel):
+    used: int
+    limit: int
+    remaining: int
+
+
 class WindowStats(BaseModel):
     total: int
     vip: int
@@ -111,12 +145,16 @@ class WindowStats(BaseModel):
     low: int
     duplicates: int
     avg_confidence: int
+    tokens: TokenStats
 
 
 class StatsResponse(BaseModel):
     client_id: str
+    quota: QuotaStats
     windows: dict[str, WindowStats]
 
+
+# ── Endpoints ──────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 def health() -> dict:
@@ -126,16 +164,59 @@ def health() -> dict:
 @app.get("/stats", response_model=StatsResponse)
 def stats(tenant: TenantConfig = Depends(require_tenant)) -> StatsResponse:
     try:
+        quota_data = get_quota_status(tenant.client_id, tenant.monthly_quota)
+        windows = {}
+        for label, hours in [("last_24h", 24), ("last_7d", 168), ("last_30d", 720)]:
+            w = get_stats_window(tenant.client_id, hours)
+            windows[label] = WindowStats(
+                total=w["total"],
+                vip=w["vip"],
+                medium=w["medium"],
+                low=w["low"],
+                duplicates=w["duplicates"],
+                avg_confidence=w["avg_confidence"],
+                tokens=TokenStats(
+                    input=w["input_tokens"],
+                    output=w["output_tokens"],
+                    cache_read=w["cache_read_tokens"],
+                    estimated_usd=w["estimated_usd"],
+                ),
+            )
         return StatsResponse(
             client_id=tenant.client_id,
-            windows={
-                "last_24h": WindowStats(**get_stats_window(tenant.client_id, 24)),
-                "last_7d":  WindowStats(**get_stats_window(tenant.client_id, 168)),
-                "last_30d": WindowStats(**get_stats_window(tenant.client_id, 720)),
-            },
+            quota=QuotaStats(**quota_data),
+            windows=windows,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail="stats unavailable") from exc
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard(
+    request: Request,
+    window: str = "30d",
+    tenant: TenantConfig = Depends(require_tenant),
+) -> HTMLResponse:
+    hours_map = {"24h": 24, "7d": 168, "30d": 720}
+    hours = hours_map.get(window, 720)
+    stats_data = get_stats_window(tenant.client_id, hours)
+    quota = get_quota_status(tenant.client_id, tenant.monthly_quota)
+    locations = get_top_locations(tenant.client_id, hours)
+    recent = get_recent_evaluations(tenant.client_id, limit=20)
+    max_loc_count = max((loc["count"] for loc in locations), default=1)
+    return templates.TemplateResponse(
+        "dashboard.html",
+        {
+            "request": request,
+            "tenant": tenant,
+            "window": window,
+            "stats": stats_data,
+            "quota": quota,
+            "locations": locations,
+            "max_loc_count": max_loc_count,
+            "recent": recent,
+        },
+    )
 
 
 @app.post("/evaluate", response_model=EvaluationResult)
@@ -143,49 +224,72 @@ def stats(tenant: TenantConfig = Depends(require_tenant)) -> StatsResponse:
 def evaluate(
     request: Request,
     payload: LeadPayload,
+    background_tasks: BackgroundTasks,
     tenant: TenantConfig = Depends(require_tenant),
 ) -> EvaluationResult:
     request_id = getattr(request.state, "request_id", "-")
+
+    try:
+        check_quota(tenant.client_id, tenant.monthly_quota)
+    except QuotaExceededError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Monthly quota of {exc.limit} evaluations reached. Contact support to upgrade.",
+        )
+
     phone_hash = hash_phone(payload.phone_number) if payload.phone_number else ""
 
     if phone_hash and is_duplicate(tenant.client_id, phone_hash):
-        log_evaluation(tenant.client_id, phone_hash, "Medium", 0, is_dup=True)
+        dup_result = {
+            "tier": "Medium",
+            "confidence": 0,
+            "reasoning": "Duplicate submission — this phone was evaluated within the last 24 hours.",
+            "visual_signals": "none",
+            "sales_strategy": "Check the original evaluation record for this lead.",
+        }
+        eval_id = log_evaluation(
+            tenant.client_id, phone_hash, payload.phone_number,
+            payload.lead_name, payload.location,
+            "Medium", 0,
+            "Duplicate submission — this phone was evaluated within the last 24 hours.",
+            0, 0, 0, is_dup=True,
+        )
+        background_tasks.add_task(
+            fire_integrations, tenant, payload.model_dump(), dup_result, eval_id, True
+        )
         log.info(
             "evaluation",
             extra={
-                "request_id": request_id,
-                "tenant_id": tenant.client_id,
-                "tier": "Medium",
-                "confidence": 0,
-                "is_duplicate": True,
+                "request_id": request_id, "tenant_id": tenant.client_id,
+                "tier": "Medium", "confidence": 0, "is_duplicate": True,
             },
         )
-        return EvaluationResult(
-            tier="Medium",
-            confidence=0,
-            reasoning="Duplicate submission — this phone was evaluated within the last 24 hours.",
-            visual_signals="none",
-            sales_strategy="Check the original evaluation record for this lead.",
-            is_duplicate=True,
-        )
+        return EvaluationResult(**dup_result, is_duplicate=True)
 
     try:
-        result = evaluate_lead(payload.model_dump(), tenant)
+        result, usage = evaluate_lead(payload.model_dump(), tenant)
     except ValueError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
+    eval_id = None
     if phone_hash:
-        log_evaluation(
-            tenant.client_id, phone_hash, result["tier"], result.get("confidence", 0)
+        eval_id = log_evaluation(
+            tenant.client_id, phone_hash, payload.phone_number,
+            payload.lead_name, payload.location,
+            result["tier"], result.get("confidence", 0),
+            result.get("reasoning", ""),
+            usage["input_tokens"], usage["output_tokens"], usage["cache_read_tokens"],
         )
+
+    background_tasks.add_task(
+        fire_integrations, tenant, payload.model_dump(), result, eval_id, False
+    )
 
     log.info(
         "evaluation",
         extra={
-            "request_id": request_id,
-            "tenant_id": tenant.client_id,
-            "tier": result["tier"],
-            "confidence": result.get("confidence", 0),
+            "request_id": request_id, "tenant_id": tenant.client_id,
+            "tier": result["tier"], "confidence": result.get("confidence", 0),
             "is_duplicate": False,
         },
     )
