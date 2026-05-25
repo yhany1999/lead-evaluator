@@ -31,13 +31,16 @@ def test_invalid_api_key_returns_401(client):
 def test_valid_api_key_passes_auth(client, monkeypatch):
     monkeypatch.setattr(
         "tools.api_server.evaluate_lead",
-        lambda lead, tenant: {
-            "tier": "Medium",
-            "confidence": 70,
-            "reasoning": "Standard profile.",
-            "visual_signals": "none",
-            "sales_strategy": "Add to standard pipeline.",
-        },
+        lambda lead, tenant: (
+            {
+                "tier": "Medium",
+                "confidence": 70,
+                "reasoning": "Standard profile.",
+                "visual_signals": "none",
+                "sales_strategy": "Add to standard pipeline.",
+            },
+            {"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 80},
+        ),
     )
     resp = client.post(
         "/evaluate",
@@ -54,7 +57,7 @@ def test_duplicate_phone_returns_without_calling_claude(client, monkeypatch):
     from tools.db import hash_phone, log_evaluation
     phone = "+201234567890"
     phone_hash = hash_phone(phone)
-    log_evaluation("agency-01", phone_hash, "VIP", 90)
+    log_evaluation("agency-01", phone_hash, phone, "Test Lead", "North Coast", "VIP", 90, "reasoning", 100, 50, 80)
 
     claude_called = []
     monkeypatch.setattr(
@@ -81,18 +84,21 @@ def test_dedup_is_isolated_per_tenant(tmp_path, monkeypatch):
 
     from tools.db import hash_phone, log_evaluation
     phone = "+201111111111"
-    log_evaluation("agency-01", hash_phone(phone), "VIP", 88)
+    log_evaluation("agency-01", hash_phone(phone), phone, "Test Lead", "North Coast", "VIP", 88, "reasoning", 100, 50, 80)
 
     from tools.api_server import app
     monkeypatch.setattr(
         "tools.api_server.evaluate_lead",
-        lambda lead, tenant: {
-            "tier": "Medium",
-            "confidence": 55,
-            "reasoning": "ok",
-            "visual_signals": "none",
-            "sales_strategy": "pipeline",
-        },
+        lambda lead, tenant: (
+            {
+                "tier": "Medium",
+                "confidence": 55,
+                "reasoning": "ok",
+                "visual_signals": "none",
+                "sales_strategy": "pipeline",
+            },
+            {"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 80},
+        ),
     )
     with TestClient(app) as c:
         resp = c.post(

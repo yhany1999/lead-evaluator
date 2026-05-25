@@ -12,21 +12,33 @@ from tools.db import (
 )
 
 
+def _log(client_id, phone, tier, confidence, is_dup=False):
+    log_evaluation(
+        client_id, hash_phone(phone), phone, "Test Lead", "North Coast",
+        tier, confidence, "reasoning", 100, 50, 80, is_dup=is_dup,
+    )
+
+
 def test_empty_window_returns_zeroed_counts(tmp_db):
     create_tenant("agency-01", "key", "Alpha")
     stats = get_stats_window("agency-01", 24)
-    assert stats == {
-        "total": 0, "vip": 0, "medium": 0, "low": 0,
-        "duplicates": 0, "avg_confidence": 0,
-    }
+    assert stats["total"] == 0
+    assert stats["vip"] == 0
+    assert stats["medium"] == 0
+    assert stats["low"] == 0
+    assert stats["duplicates"] == 0
+    assert stats["avg_confidence"] == 0
+    assert stats["input_tokens"] == 0
+    assert stats["output_tokens"] == 0
+    assert stats["estimated_usd"] == 0.0
 
 
 def test_tier_counts_exclude_duplicates(tmp_db):
     create_tenant("agency-01", "key", "Alpha")
-    log_evaluation("agency-01", hash_phone("+1"), "VIP", 90)
-    log_evaluation("agency-01", hash_phone("+2"), "Medium", 70)
-    log_evaluation("agency-01", hash_phone("+3"), "Low", 40)
-    log_evaluation("agency-01", hash_phone("+4"), "VIP", 0, is_dup=True)
+    _log("agency-01", "+1", "VIP", 90)
+    _log("agency-01", "+2", "Medium", 70)
+    _log("agency-01", "+3", "Low", 40)
+    _log("agency-01", "+4", "VIP", 0, is_dup=True)
     stats = get_stats_window("agency-01", 24)
     assert stats["vip"] == 1
     assert stats["medium"] == 1
@@ -55,31 +67,31 @@ def test_records_outside_window_excluded(tmp_db):
 def test_stats_isolated_per_tenant(tmp_db):
     create_tenant("agency-01", "key1", "Alpha")
     create_tenant("agency-02", "key2", "Beta")
-    log_evaluation("agency-01", hash_phone("+1"), "VIP", 88)
+    _log("agency-01", "+1", "VIP", 88)
     stats = get_stats_window("agency-02", 24)
     assert stats["total"] == 0
 
 
 def test_avg_confidence_rounds_correctly(tmp_db):
     create_tenant("agency-01", "key", "Alpha")
-    log_evaluation("agency-01", hash_phone("+1"), "VIP", 80)
-    log_evaluation("agency-01", hash_phone("+2"), "Medium", 90)
+    _log("agency-01", "+1", "VIP", 80)
+    _log("agency-01", "+2", "Medium", 90)
     stats = get_stats_window("agency-01", 24)
     assert stats["avg_confidence"] == 85
 
 
 def test_avg_confidence_excludes_duplicates(tmp_db):
     create_tenant("agency-01", "key", "Alpha")
-    log_evaluation("agency-01", hash_phone("+1"), "VIP", 80)
-    log_evaluation("agency-01", hash_phone("+2"), "Medium", 0, is_dup=True)
+    _log("agency-01", "+1", "VIP", 80)
+    _log("agency-01", "+2", "Medium", 0, is_dup=True)
     stats = get_stats_window("agency-01", 24)
     assert stats["avg_confidence"] == 80
 
 
 def test_avg_confidence_classical_rounding(tmp_db):
     create_tenant("agency-01", "key", "Alpha")
-    log_evaluation("agency-01", hash_phone("+1"), "VIP", 80)
-    log_evaluation("agency-01", hash_phone("+2"), "Medium", 81)
+    _log("agency-01", "+1", "VIP", 80)
+    _log("agency-01", "+2", "Medium", 81)
     # avg = 80.5 — classical rounding gives 81, banker's rounding gives 80
     stats = get_stats_window("agency-01", 24)
     assert stats["avg_confidence"] == 81
@@ -87,14 +99,14 @@ def test_avg_confidence_classical_rounding(tmp_db):
 
 def test_avg_confidence_zero_when_all_duplicates(tmp_db):
     create_tenant("agency-01", "key", "Alpha")
-    log_evaluation("agency-01", hash_phone("+1"), "VIP", 0, is_dup=True)
+    _log("agency-01", "+1", "VIP", 0, is_dup=True)
     stats = get_stats_window("agency-01", 24)
     assert stats["avg_confidence"] == 0
 
 
 def test_hours_zero_returns_zeroed_counts(tmp_db):
     create_tenant("agency-01", "key", "Alpha")
-    log_evaluation("agency-01", hash_phone("+1"), "VIP", 90)
+    _log("agency-01", "+1", "VIP", 90)
     # hours=0 means cutoff=now, so evaluated_at > now is always false
     stats = get_stats_window("agency-01", 0)
     assert stats["total"] == 0
@@ -121,6 +133,8 @@ def test_stats_returns_200_with_all_windows(client):
     data = resp.json()
     assert data["client_id"] == "agency-01"
     assert set(data["windows"].keys()) == {"last_24h", "last_7d", "last_30d"}
+    assert "quota" in data
+    assert data["quota"]["limit"] == 1000
 
 
 def test_stats_missing_key_returns_422(client):
@@ -138,15 +152,16 @@ def test_stats_invalid_key_returns_401(client):
 def test_stats_empty_db_returns_zeroed_counts(client):
     resp = client.get("/stats", headers={"X-API-Key": "valid-key"})
     window = resp.json()["windows"]["last_24h"]
-    assert window == {
-        "total": 0, "vip": 0, "medium": 0,
-        "low": 0, "duplicates": 0, "avg_confidence": 0,
-    }
+    assert window["total"] == 0
+    assert window["vip"] == 0
+    assert window["avg_confidence"] == 0
+    assert window["tokens"]["input"] == 0
+    assert window["tokens"]["estimated_usd"] == 0.0
 
 
 def test_stats_counts_reflect_evaluations(client):
-    log_evaluation("agency-01", hash_phone("+1"), "VIP", 90)
-    log_evaluation("agency-01", hash_phone("+2"), "VIP", 0, is_dup=True)
+    _log("agency-01", "+1", "VIP", 90)
+    _log("agency-01", "+2", "VIP", 0, is_dup=True)
     resp = client.get("/stats", headers={"X-API-Key": "valid-key"})
     w = resp.json()["windows"]["last_24h"]
     assert w["vip"] == 1
@@ -160,7 +175,7 @@ def test_stats_cross_tenant_isolation(tmp_path, monkeypatch):
     init_db()
     create_tenant("agency-01", "key-one", "Alpha")
     create_tenant("agency-02", "key-two", "Beta")
-    log_evaluation("agency-01", hash_phone("+1"), "VIP", 88)
+    _log("agency-01", "+1", "VIP", 88)
     from tools.api_server import app
     with TestClient(app) as c:
         resp = c.get("/stats", headers={"X-API-Key": "key-two"})

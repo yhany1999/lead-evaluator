@@ -57,7 +57,7 @@ def test_is_duplicate_false_for_new_phone(tmp_db):
 def test_is_duplicate_true_after_evaluation(tmp_db):
     create_tenant("agency-01", "key", "Alpha")
     phone_hash = hash_phone("+201234567890")
-    log_evaluation("agency-01", phone_hash, "VIP", 92)
+    log_evaluation("agency-01", phone_hash, "+201234567890", "Test Lead", "North Coast", "VIP", 92, "reasoning", 100, 50, 80)
     assert is_duplicate("agency-01", phone_hash) is True
 
 
@@ -80,7 +80,7 @@ def test_is_duplicate_isolated_per_client(tmp_db):
     create_tenant("agency-01", "key1", "Alpha")
     create_tenant("agency-02", "key2", "Beta")
     phone_hash = hash_phone("+201234567890")
-    log_evaluation("agency-01", phone_hash, "VIP", 88)
+    log_evaluation("agency-01", phone_hash, "+201234567890", "Test Lead", "North Coast", "VIP", 88, "reasoning", 100, 50, 80)
     # Same phone, different client — must NOT be a duplicate
     assert is_duplicate("agency-02", phone_hash) is False
 
@@ -88,7 +88,7 @@ def test_is_duplicate_isolated_per_client(tmp_db):
 def test_log_evaluation_records_entry(tmp_db):
     create_tenant("agency-01", "key", "Alpha")
     phone_hash = hash_phone("+201234567890")
-    log_evaluation("agency-01", phone_hash, "VIP", 90)
+    log_evaluation("agency-01", phone_hash, "+201234567890", "Test Lead", "North Coast", "VIP", 90, "reasoning", 100, 50, 80)
     conn = sqlite3.connect(str(db_module.DB_PATH))
     row = conn.execute(
         "SELECT tier, confidence FROM evaluations WHERE client_id = ?", ("agency-01",)
