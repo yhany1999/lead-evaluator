@@ -1,7 +1,7 @@
 # SaaS Productization Phase — Design Spec
 
 **Date:** 2026-05-25
-**Status:** Approved
+**Status:** Approved (revised 2026-05-25)
 **Scope:** Google Sheets integration, VIP notifications (Telegram + WhatsApp), lightweight dashboard, tenant config management CLI, usage quota enforcement, webhook support, schema evolution.
 
 ---
@@ -68,16 +68,17 @@ ALTER TABLE evaluations ADD COLUMN output_tokens      INTEGER NOT NULL DEFAULT 0
 ALTER TABLE evaluations ADD COLUMN cache_read_tokens  INTEGER NOT NULL DEFAULT 0;
 ```
 
-`phone_number` stores the full number — this is the tenant's CRM data on their own server.
+`phone_number` stores the full number — this is the tenant's CRM data on their own server. **Never included in structured log output.** Only used in Sheets rows, VIP notification messages, and webhook payloads. Not shown in the dashboard (dashboard displays last 4 digits only: `****1234`).
 `location` enables the top-locations stat and dashboard bar chart.
-`reasoning` is stored for Sheets export and VIP notification message body.
+`reasoning` is stored for Sheets export and VIP notification message body. **Truncated to 500 characters** in `log_evaluation()` before INSERT — keeps DB lean and notifications concise.
 `source` is set to `'api'` by the server; reserved for future ManyChat/n8n source tagging.
 `input_tokens` / `output_tokens` / `cache_read_tokens` from the Anthropic usage object; used for cost estimation in `/stats` and dashboard.
 
-### `tenants` table — 9 new columns
+### `tenants` table — 10 new columns
 
 ```sql
 ALTER TABLE tenants ADD COLUMN monthly_quota      INTEGER NOT NULL DEFAULT 1000;
+ALTER TABLE tenants ADD COLUMN is_active          INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE tenants ADD COLUMN sheets_id          TEXT NOT NULL DEFAULT '';
 ALTER TABLE tenants ADD COLUMN telegram_bot_token TEXT NOT NULL DEFAULT '';
 ALTER TABLE tenants ADD COLUMN telegram_chat_id   TEXT NOT NULL DEFAULT '';
@@ -89,6 +90,7 @@ ALTER TABLE tenants ADD COLUMN vip_min_confidence INTEGER NOT NULL DEFAULT 70;
 ```
 
 `monthly_quota`: auto-block threshold. Default 1000 evaluations/month.
+`is_active`: `1` = active, `0` = suspended. Checked in `require_tenant()` — returns HTTP 403 with `{"detail": "Account suspended. Contact support."}`. Preserves all history; no data is deleted on suspension.
 `sheets_id`: Google Spreadsheet ID (the long string in the sheet URL). Empty = Sheets disabled.
 `telegram_*`: both fields must be non-empty for Telegram to activate.
 `wa_notify_*`: all three fields must be non-empty for WhatsApp to activate.
@@ -97,7 +99,14 @@ ALTER TABLE tenants ADD COLUMN vip_min_confidence INTEGER NOT NULL DEFAULT 70;
 
 ### Updated `TenantConfig` dataclass
 
-All 9 new fields added with matching defaults. `get_tenant_by_api_key()` reads them from the row. `create_tenant()` accepts them as kwargs (all optional, fall back to defaults).
+All 10 new fields added with matching defaults. `get_tenant_by_api_key()` reads them from the row. `create_tenant()` accepts them as kwargs (all optional, fall back to defaults).
+
+`require_tenant()` in `auth.py` gains a second check after the key lookup:
+```python
+if not tenant.is_active:
+    raise HTTPException(status_code=403, detail="Account suspended. Contact support.")
+```
+This runs for all authenticated endpoints (`/evaluate`, `/stats`, `/dashboard`).
 
 ---
 
@@ -126,12 +135,12 @@ Extracted from `response.usage` on the Anthropic SDK response object:
 def log_evaluation(
     client_id: str,
     phone_hash: str,
-    phone_number: str,
+    phone_number: str,   # stored in DB; never logged to stdout/stderr
     lead_name: str,
     location: str,
     tier: str,
     confidence: int,
-    reasoning: str,
+    reasoning: str,      # truncated to 500 chars before INSERT
     input_tokens: int,
     output_tokens: int,
     cache_read_tokens: int,
@@ -139,6 +148,8 @@ def log_evaluation(
     is_dup: bool = False,
 ) -> int:  # returns the new row id (needed by integrations)
 ```
+
+Truncation applied inline: `reasoning = reasoning[:500]` before the INSERT. No external utility needed.
 
 ### `check_quota()`
 
@@ -214,7 +225,13 @@ def fire_integrations(...):
     _webhook_post(...)     # guarded by tenant.webhook_url
 ```
 
-Each sub-function is independently wrapped in `try/except Exception` — logs failure at WARNING level, never propagates.
+Each sub-function is independently wrapped in `try/except Exception` — logs failure at WARNING level with `tenant_id` and integration name, never propagates. **Phone numbers are never included in log output from any integration function.**
+
+All outbound network calls carry explicit timeouts — no integration can hang and delay the background task worker. Timeouts:
+- Google Sheets API: 15 seconds (library default, overridden via `httplib2` transport)
+- Telegram `send_message`: 10 seconds (via `read_timeout` and `connect_timeout` kwargs)
+- WhatsApp POST: 10 seconds (`httpx.post(..., timeout=10)`)
+- Webhook POST: 10 seconds (`httpx.post(..., timeout=10)`)
 
 ### Google Sheets (`_sheets_append`)
 
@@ -238,12 +255,14 @@ Fires only when:
 ```
 🔔 VIP Lead — {tenant.name}
 Name: {lead_name}
-Phone: {phone_number}
+Phone: {phone_number}        ← full number (operationally required for immediate callback)
 Confidence: {confidence}%
 Location: {location}
-Reasoning: {reasoning}
+Reasoning: {reasoning}       ← already capped at 500 chars from DB
 Action: {sales_strategy}
 ```
+
+Phone number is included in the notification body (the sales director needs it to call back immediately). It is **not** included in any log.info/log.warning calls within the notification functions.
 
 **Telegram (`_telegram_notify`):**
 - Activated when both `telegram_bot_token` and `telegram_chat_id` are non-empty
@@ -270,6 +289,7 @@ Both notification channels are independent — one failing does not suppress the
   ```json
   {
     "event": "lead_evaluated",
+    "event_id": "a3f7c2d1-84bb-4e9a-b012-3f5e7a8c1d90",
     "tenant_id": "agency-01",
     "timestamp": "2026-05-25T14:23:00Z",
     "lead": {
@@ -286,6 +306,8 @@ Both notification channels are independent — one failing does not suppress the
     "is_duplicate": false
   }
   ```
+
+`event_id` is a UUID4 generated per webhook call (`uuid.uuid4()`). Enables the receiving CRM/automation to deduplicate retries and trace events in their own logs.
 
 ---
 
@@ -316,12 +338,14 @@ LIMIT 5
 
 **`get_recent_evaluations(client_id, limit=20) -> list[dict]`**
 ```sql
-SELECT lead_name, tier, confidence, location, evaluated_at, is_duplicate
+SELECT lead_name, tier, confidence, location, evaluated_at, is_duplicate,
+       '****' || SUBSTR(phone_number, -4) AS phone_masked
 FROM evaluations
 WHERE client_id = ?
 ORDER BY evaluated_at DESC
 LIMIT ?
 ```
+Raw `phone_number` is never selected by this query — only the masked form is exposed to the template.
 
 **`get_quota_status(client_id, monthly_quota) -> dict`**
 Returns `{"used": N, "limit": M, "remaining": M-N}` — same logic as `check_quota` but read-only.
@@ -336,7 +360,9 @@ Single HTML file, inline CSS (dark neutral palette, clean table layout), no exte
 3. Top Locations — horizontal bar chart rendered in pure HTML/CSS (no canvas, no chart lib)
 4. Recent Evaluations — table with Lead Name, Tier, Confidence, Location, Time
 
-Phone numbers are not shown in the dashboard. Lead names are shown as-is from the stored value.
+Phone numbers are never shown in the dashboard. Lead names are shown as-is from the stored value (falls back to `"Unknown"` if empty).
+
+**No frontend frameworks.** No React, no Vue, no SPA architecture, no chart libraries (no Chart.js, no D3). The top-locations bar chart is pure HTML/CSS (`<div>` widths as percentages). The time-window toggle is a plain `<a>` link with `?window=` query param — no JavaScript required for navigation. The only JS in the file is the optional active-tab highlight (3 lines).
 
 ---
 
@@ -364,6 +390,10 @@ Mirrors `seed_tenant.py` in structure. Accepts `client_id` as first positional a
 | `--wa-notify-to` | `wa_notify_to` |
 | `--webhook-url` | `webhook_url` |
 | `--vip-min-confidence` | `vip_min_confidence` |
+| `--suspend` | `is_active = 0` |
+| `--activate` | `is_active = 1` |
+
+`--suspend` and `--activate` are mutually exclusive flags (argparse group). Prints `"agency-01 suspended."` or `"agency-01 activated."`.
 
 **Behaviour:**
 - Only passed flags are updated (`UPDATE tenants SET col=? WHERE client_id=?` per flag)
@@ -433,7 +463,10 @@ All notification credentials (Telegram tokens, WhatsApp tokens, webhook URLs) li
 | VIP lead below confidence threshold | No notification sent |
 | Duplicate lead | Logged to Sheets (marked), no VIP notification |
 | Quota reached | HTTP 429 before Claude call — zero tokens burned |
+| Tenant suspended (`is_active=0`) | HTTP 403 on all authenticated endpoints, history preserved |
 | Schema column already exists on restart | `OperationalError` caught per column, startup continues |
+| phone_number empty (legacy row) | `phone_masked` returns `'****'`, no crash |
+| reasoning > 500 chars from Claude | Truncated to 500 in `log_evaluation()` before INSERT |
 
 ---
 
