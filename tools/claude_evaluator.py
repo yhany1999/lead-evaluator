@@ -45,6 +45,7 @@ load_dotenv()
 MODEL = "claude-sonnet-4-5"
 MAX_OUTPUT_TOKENS = 512
 VALID_TIERS = ("VIP", "Medium", "Low")
+EMPTY_USAGE: dict = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}
 
 # Generic system prompt — NO market-specific thresholds, currencies, or locations.
 # Per-client rules are injected into the user message at call time so this block
@@ -186,8 +187,12 @@ def _parse_claude_json(text: str) -> dict:
     return result
 
 
-def evaluate_lead(lead: dict, tenant=None) -> dict:
+def evaluate_lead(lead: dict, tenant=None) -> tuple[dict, dict]:
     """Send the enriched lead payload to Claude for qualification.
+
+    Returns tuple[dict, dict]: (evaluation_result, token_usage).
+    usage_dict keys: input_tokens, output_tokens, cache_read_tokens.
+    On API failure, returns (FALLBACK_RESULT, EMPTY_USAGE).
 
     tenant: TenantConfig from the DB (HTTP server mode), or None for DEFAULT_TENANT (CLI).
     The SDK retries once automatically on transient errors; on second failure FALLBACK_RESULT
@@ -225,7 +230,13 @@ def evaluate_lead(lead: dict, tenant=None) -> dict:
             (block.text for block in response.content if block.type == "text"),
             "",
         )
-        return _parse_claude_json(text)
+        result = _parse_claude_json(text)
+        usage = {
+            "input_tokens":      response.usage.input_tokens,
+            "output_tokens":     response.usage.output_tokens,
+            "cache_read_tokens": getattr(response.usage, "cache_read_input_tokens", 0) or 0,
+        }
+        return result, usage
 
     except (
         anthropic.APITimeoutError,
@@ -234,7 +245,7 @@ def evaluate_lead(lead: dict, tenant=None) -> dict:
         ValueError,
     ) as exc:
         sys.stderr.write(f"[claude_evaluator] Evaluation failed: {exc}\n")
-        return FALLBACK_RESULT
+        return FALLBACK_RESULT, EMPTY_USAGE
 
 
 def main() -> None:
@@ -249,7 +260,7 @@ def main() -> None:
         sys.stderr.write(f"[claude_evaluator] Invalid JSON on stdin: {exc}\n")
         sys.exit(1)
 
-    result = evaluate_lead(lead)
+    result, _usage = evaluate_lead(lead)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

@@ -176,3 +176,62 @@ def test_system_prompt_contains_no_hardcoded_currency():
     assert "AED" not in SYSTEM_PROMPT
     assert "8,000,000" not in SYSTEM_PROMPT
     assert "8M" not in SYSTEM_PROMPT
+
+
+def test_evaluate_lead_returns_tuple(monkeypatch):
+    import anthropic
+    from tools.claude_evaluator import evaluate_lead
+
+    class _FakeUsage:
+        input_tokens = 120
+        output_tokens = 48
+        cache_read_input_tokens = 95
+
+    class _FakeContent:
+        type = "text"
+        text = json.dumps({
+            "tier": "VIP",
+            "confidence": 88,
+            "reasoning": "High budget.",
+            "visual_signals": "none",
+            "sales_strategy": "Assign to senior closer.",
+        })
+
+    class _FakeResponse:
+        content = [_FakeContent()]
+        usage = _FakeUsage()
+
+    class _FakeClient:
+        def __init__(self, **kwargs): pass
+        class messages:
+            @staticmethod
+            def create(**kwargs):
+                return _FakeResponse()
+
+    monkeypatch.setattr("tools.claude_evaluator.anthropic.Anthropic", _FakeClient)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    result, usage = evaluate_lead({"lead_name": "Ahmed"})
+    assert result["tier"] == "VIP"
+    assert usage["input_tokens"] == 120
+    assert usage["output_tokens"] == 48
+    assert usage["cache_read_tokens"] == 95
+
+
+def test_evaluate_lead_fallback_returns_tuple(monkeypatch):
+    import anthropic
+    from tools.claude_evaluator import evaluate_lead, FALLBACK_RESULT
+
+    class _FakeClient:
+        def __init__(self, **kwargs): pass
+        class messages:
+            @staticmethod
+            def create(**kwargs):
+                raise anthropic.APITimeoutError(request=None)
+
+    monkeypatch.setattr("tools.claude_evaluator.anthropic.Anthropic", _FakeClient)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    result, usage = evaluate_lead({"lead_name": "Ahmed"})
+    assert result == FALLBACK_RESULT
+    assert usage == {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}
