@@ -108,3 +108,23 @@ def test_health_endpoint_requires_no_auth(client):
     resp = client.get("/health")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
+
+
+def test_suspended_tenant_returns_403(tmp_path, monkeypatch):
+    import sqlite3 as _sqlite3
+    monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.db")
+    init_db()
+    create_tenant("agency-suspended", "suspended-key", "Suspended Agency")
+    conn = _sqlite3.connect(str(db_module.DB_PATH))
+    conn.execute("UPDATE tenants SET is_active = 0 WHERE client_id = 'agency-suspended'")
+    conn.commit()
+    conn.close()
+    from tools.api_server import app
+    with TestClient(app) as c:
+        resp = c.post(
+            "/evaluate",
+            headers={"X-API-Key": "suspended-key"},
+            json={"lead_name": "Test"},
+        )
+    assert resp.status_code == 403
+    assert "suspended" in resp.json()["detail"].lower()
