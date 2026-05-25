@@ -8,6 +8,8 @@ services:
     envVars:
       - key: ANTHROPIC_API_KEY
         sync: false
+      - key: ADMIN_KEY
+        sync: false
       - key: LOG_LEVEL
         value: INFO
     disk:

@@ -31,12 +31,13 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from tools.auth import require_tenant
+from tools.auth import require_admin, require_tenant
 from tools.claude_evaluator import evaluate_lead
 from tools.db import (
     QuotaExceededError,
     TenantConfig,
     check_quota,
+    create_tenant,
     get_quota_status,
     get_recent_evaluations,
     get_stats_window,
@@ -161,7 +162,52 @@ class StatsResponse(BaseModel):
     windows: dict[str, WindowStats]
 
 
+class TenantCreateRequest(BaseModel):
+    client_id: str
+    name: str
+    budget_vip_min: int = 8_000_000
+    budget_medium_min: int = 3_000_000
+    currency: str = "EGP"
+    vip_locations: list[str] = ["North Coast", "New Zayed", "Gouna", "Golden Square", "New Cairo"]
+    output_language: str = "en"
+    monthly_quota: int = 1000
+
+
+class TenantCreateResponse(BaseModel):
+    client_id: str
+    api_key: str
+    message: str
+
+
 # ── Endpoints ──────────────────────────────────────────────────────────────────
+
+@app.post("/admin/tenants", response_model=TenantCreateResponse, status_code=201)
+def admin_create_tenant(
+    body: TenantCreateRequest,
+    _: None = Depends(require_admin),
+) -> TenantCreateResponse:
+    import secrets as _secrets
+    api_key = _secrets.token_urlsafe(32)
+    try:
+        create_tenant(
+            body.client_id,
+            api_key,
+            body.name,
+            budget_vip_min=body.budget_vip_min,
+            budget_medium_min=body.budget_medium_min,
+            currency=body.currency,
+            vip_locations=body.vip_locations,
+            output_language=body.output_language,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    log.info("admin", extra={"action": "create_tenant", "client_id": body.client_id})
+    return TenantCreateResponse(
+        client_id=body.client_id,
+        api_key=api_key,
+        message="Save this key — it is hashed in the database and cannot be recovered.",
+    )
+
 
 @app.get("/health")
 def health() -> dict:
