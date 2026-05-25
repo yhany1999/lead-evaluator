@@ -37,7 +37,7 @@ def _get_sheets_service():
         _sheets_svc = build("sheets", "v4", credentials=creds, cache_discovery=False)
         return _sheets_svc
     except Exception as exc:
-        log.warning("integrations: failed to init Sheets service", extra={"error": str(exc)})
+        log.warning("integrations: failed to init Sheets service")
         return None
 
 
@@ -82,7 +82,7 @@ def _sheets_append(tenant: TenantConfig, lead: dict, result: dict, is_duplicate:
     except Exception as exc:
         log.warning(
             "integrations: Sheets append failed",
-            extra={"tenant_id": tenant.client_id, "error": str(exc)},
+            extra={"tenant_id": tenant.client_id},
         )
 
 
@@ -172,7 +172,7 @@ def _webhook_post(tenant: TenantConfig, lead: dict, result: dict, is_duplicate: 
     except Exception as exc:
         log.warning(
             "integrations: webhook post failed",
-            extra={"tenant_id": tenant.client_id, "error": str(exc)},
+            extra={"tenant_id": tenant.client_id},
         )
 
 
