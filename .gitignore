@@ -3,3 +3,8 @@ credentials.json
 token.json
 .tmp/
 data/
+__pycache__/
+*.pyc
+*.pyo
+.claude/
+.playwright-mcp/
