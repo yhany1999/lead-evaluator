@@ -110,7 +110,7 @@ def _telegram_notify(tenant: TenantConfig, message: str) -> None:
     except Exception as exc:
         log.warning(
             "integrations: Telegram notify failed",
-            extra={"tenant_id": tenant.client_id, "error": str(exc)},
+            extra={"tenant_id": tenant.client_id},
         )
 
 
@@ -127,7 +127,7 @@ def _whatsapp_notify(tenant: TenantConfig, message: str) -> None:
     except Exception as exc:
         log.warning(
             "integrations: WhatsApp notify failed",
-            extra={"tenant_id": tenant.client_id, "error": str(exc)},
+            extra={"tenant_id": tenant.client_id},
         )
 
 
