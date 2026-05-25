@@ -1,9 +1,14 @@
 import hashlib
+import json
+import logging
+import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent.parent / "data" / "leads.db"
 DEDUP_TTL_HOURS = 24
@@ -109,6 +114,52 @@ def init_db() -> None:
     _add_column_if_missing("tenants", "wa_notify_to",       "TEXT NOT NULL DEFAULT ''")
     _add_column_if_missing("tenants", "webhook_url",        "TEXT NOT NULL DEFAULT ''")
     _add_column_if_missing("tenants", "vip_min_confidence", "INTEGER NOT NULL DEFAULT 70")
+    _seed_from_env()
+
+
+def _seed_from_env() -> None:
+    raw = os.getenv("TENANT_SEED", "").strip()
+    if not raw:
+        return
+    try:
+        tenants = json.loads(raw)
+    except json.JSONDecodeError:
+        log.warning("TENANT_SEED is set but contains invalid JSON — skipping auto-seed")
+        return
+    for t in tenants:
+        try:
+            with get_conn() as conn:
+                conn.execute(
+                    """INSERT OR IGNORE INTO tenants (
+                        client_id, api_key_hash, name,
+                        budget_vip_min, budget_medium_min, currency,
+                        vip_locations, output_language, monthly_quota,
+                        is_active, sheets_id, telegram_bot_token,
+                        telegram_chat_id, wa_notify_url, wa_notify_token,
+                        wa_notify_to, webhook_url, vip_min_confidence
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        t["client_id"], t["api_key_hash"], t["name"],
+                        t.get("budget_vip_min", 8_000_000),
+                        t.get("budget_medium_min", 3_000_000),
+                        t.get("currency", "EGP"),
+                        t.get("vip_locations", "North Coast,New Zayed,Gouna,Golden Square,New Cairo"),
+                        t.get("output_language", "en"),
+                        t.get("monthly_quota", 1000),
+                        t.get("is_active", 1),
+                        t.get("sheets_id", ""),
+                        t.get("telegram_bot_token", ""),
+                        t.get("telegram_chat_id", ""),
+                        t.get("wa_notify_url", ""),
+                        t.get("wa_notify_token", ""),
+                        t.get("wa_notify_to", ""),
+                        t.get("webhook_url", ""),
+                        t.get("vip_min_confidence", 70),
+                    ),
+                )
+            log.info("seed: tenant %s ensured from TENANT_SEED", t["client_id"])
+        except Exception:
+            log.warning("seed: failed to insert tenant %s", t.get("client_id", "?"))
 
 
 def hash_key(api_key: str) -> str:
