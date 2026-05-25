@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: lead-evaluator
+    runtime: docker
+    plan: starter
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: LOG_LEVEL
+        value: INFO
+    disk:
+      name: lead-evaluator-data
+      mountPath: /app/data
+      sizeGB: 1
+    healthCheckPath: /health
