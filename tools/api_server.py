@@ -31,7 +31,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from tools.auth import require_admin, require_tenant
+from tools.auth import require_admin, require_tenant, require_tenant_dashboard
 from tools.claude_evaluator import evaluate_lead
 from tools.db import (
     QuotaExceededError,
@@ -248,7 +248,7 @@ def stats(tenant: TenantConfig = Depends(require_tenant)) -> StatsResponse:
 def dashboard(
     request: Request,
     window: str = "30d",
-    tenant: TenantConfig = Depends(require_tenant),
+    tenant: TenantConfig = Depends(require_tenant_dashboard),
 ) -> HTMLResponse:
     hours_map = {"24h": 24, "7d": 168, "30d": 720}
     hours = hours_map.get(window, 720)
