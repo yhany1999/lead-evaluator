@@ -25,6 +25,7 @@ from dotenv import load_dotenv
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
+from jinja2 import Environment, FileSystemLoader
 from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -52,7 +53,13 @@ load_dotenv()
 
 log = logging.getLogger(__name__)
 
-templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+# cache_size=0 works around a Python 3.14 + Jinja2 LRU cache hash bug
+_jinja_env = Environment(
+    loader=FileSystemLoader(str(Path(__file__).parent / "templates")),
+    autoescape=True,
+    cache_size=0,
+)
+templates = Jinja2Templates(env=_jinja_env)
 
 
 def _tenant_key(request: Request) -> str:
@@ -205,9 +212,9 @@ def dashboard(
     recent = get_recent_evaluations(tenant.client_id, limit=20)
     max_loc_count = max((loc["count"] for loc in locations), default=1)
     return templates.TemplateResponse(
+        request,
         "dashboard.html",
-        {
-            "request": request,
+        context={
             "tenant": tenant,
             "window": window,
             "stats": stats_data,
