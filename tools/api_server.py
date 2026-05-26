@@ -38,6 +38,7 @@ from tools.db import (
     TenantConfig,
     check_quota,
     create_tenant,
+    get_conn,
     get_quota_status,
     get_recent_evaluations,
     get_stats_window,
@@ -207,6 +208,27 @@ def admin_create_tenant(
         api_key=api_key,
         message="Save this key — it is hashed in the database and cannot be recovered.",
     )
+
+
+class BootstrapRequest(BaseModel):
+    client_id: str
+    name: str
+    api_key: str
+
+
+@app.post("/bootstrap", status_code=201)
+def bootstrap_first_tenant(body: BootstrapRequest) -> dict:
+    """One-time setup — only succeeds when the tenants table is empty."""
+    with get_conn() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM tenants").fetchone()[0]
+    if count > 0:
+        raise HTTPException(status_code=403, detail="Already bootstrapped.")
+    try:
+        create_tenant(body.client_id, body.api_key, body.name)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    log.info("bootstrap", extra={"action": "bootstrap_tenant", "client_id": body.client_id})
+    return {"client_id": body.client_id, "message": "Tenant created. Endpoint now permanently disabled."}
 
 
 @app.get("/health")
